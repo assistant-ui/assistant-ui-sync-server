@@ -1,0 +1,88 @@
+services:
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  sync-server-1:
+    build:
+      context: .
+      dockerfile: packages/sync-server/Dockerfile
+    environment:
+      PORT: "8787"
+
+    mem_limit: 512m
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8787/api/health | grep -q activeThreads"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  sync-server-2:
+    build:
+      context: .
+      dockerfile: packages/sync-server/Dockerfile
+    environment:
+      PORT: "8787"
+
+    mem_limit: 512m
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8787/api/health | grep -q activeThreads"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  scaler:
+    build:
+      context: .
+      dockerfile: packages/scaler/Dockerfile
+    ports:
+      - "8788:8788"
+    environment:
+      PORT: "8788"
+      REDIS_URL: "redis://redis:6379"
+      SYNC_SERVERS: "http://sync-server-1:8787,http://sync-server-2:8787"
+
+    depends_on:
+      redis:
+        condition: service_healthy
+      sync-server-1:
+        condition: service_healthy
+      sync-server-2:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8788/api/health | grep -q redis"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  test-server:
+    build:
+      context: .
+      dockerfile: packages/test-server/Dockerfile
+    environment:
+      PORT: "9999"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:9999/api/health | grep -q ok"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Run with: docker compose --profile test run --rm test-client
+  test-client:
+    build:
+      context: .
+      dockerfile: packages/test-client/Dockerfile
+    environment:
+      SYNC_URL: "http://scaler:8788"
+      BACKEND_URL: "http://test-server:9999/api/chat"
+    depends_on:
+      scaler:
+        condition: service_healthy
+      test-server:
+        condition: service_healthy
+    profiles:
+      - test

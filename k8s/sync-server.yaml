@@ -1,0 +1,113 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sync-server
+  namespace: sync-server
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: sync-server
+  template:
+    metadata:
+      labels:
+        app: sync-server
+    spec:
+      # Allow up to 1 hour for active streams to finish draining.
+      # The preStop sleep gives K8s time to remove the pod from endpoints before
+      # SIGTERM is delivered, so no new requests arrive during the drain.
+      terminationGracePeriodSeconds: 3630
+      containers:
+        - name: sync-server
+          image: assistant-ui/sync-server:latest
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 8787
+          env:
+            - name: PORT
+              value: "8787"
+            # Must be <= terminationGracePeriodSeconds - preStop sleep (3600 = 3630 - 30)
+            - name: SHUTDOWN_TIMEOUT_MS
+              value: "3600000"
+          resources:
+            requests:
+              memory: 256Mi
+              cpu: 100m
+            limits:
+              memory: 512Mi
+              cpu: 1000m
+          lifecycle:
+            preStop:
+              # Sleep 30s before SIGTERM so K8s has time to:
+              # 1. Remove pod from endpoint slice
+              # 2. Propagate the change to kube-proxy / scaler
+              # This ensures no new requests arrive during the drain window.
+              exec:
+                command: ["sleep", "30"]
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 8787
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 8787
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 3
+---
+# Headless service — gives the scaler access to individual pod IPs via the Endpoints API
+apiVersion: v1
+kind: Service
+metadata:
+  name: sync-server
+  namespace: sync-server
+spec:
+  clusterIP: None
+  selector:
+    app: sync-server
+  ports:
+    - port: 8787
+      targetPort: 8787
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: sync-server
+  namespace: sync-server
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: sync-server
+  minReplicas: 2
+  maxReplicas: 20
+  metrics:
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 60
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+  behavior:
+    scaleDown:
+      # Slow scale-down to avoid evicting in-flight streams
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 120
+    scaleUp:
+      stabilizationWindowSeconds: 30
+      policies:
+        - type: Pods
+          value: 2
+          periodSeconds: 60

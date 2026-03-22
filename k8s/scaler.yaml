@@ -1,0 +1,125 @@
+# ServiceAccount + RBAC so the scaler can read Endpoints from the K8s API
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: scaler
+  namespace: sync-server
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: scaler-endpoints-reader
+  namespace: sync-server
+rules:
+  - apiGroups: [""]
+    resources: ["endpoints"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: scaler-endpoints-reader
+  namespace: sync-server
+subjects:
+  - kind: ServiceAccount
+    name: scaler
+    namespace: sync-server
+roleRef:
+  kind: Role
+  name: scaler-endpoints-reader
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: scaler
+  namespace: sync-server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: scaler
+  template:
+    metadata:
+      labels:
+        app: scaler
+    spec:
+      serviceAccountName: scaler
+      containers:
+        - name: scaler
+          image: assistant-ui/scaler:latest
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 8788
+          env:
+            - name: PORT
+              value: "8788"
+            - name: REDIS_URL
+              value: "redis://redis:6379"
+            - name: K8S_SERVICE_NAME
+              value: "sync-server"
+            - name: K8S_NAMESPACE
+              value: "sync-server"
+            - name: K8S_SERVICE_PORT
+              value: "8787"
+            - name: RAM_THRESHOLD
+              value: "0.5"
+            - name: THREAD_TTL_SECONDS
+              value: "120"
+            # Tells Node to trust the K8s API server's self-signed CA
+            - name: NODE_EXTRA_CA_CERTS
+              value: "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+          resources:
+            requests:
+              memory: 128Mi
+              cpu: 100m
+            limits:
+              memory: 256Mi
+              cpu: 500m
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 8788
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 8788
+            initialDelaySeconds: 15
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: scaler
+  namespace: sync-server
+spec:
+  selector:
+    app: scaler
+  ports:
+    - port: 80
+      targetPort: 8788
+  type: ClusterIP
+---
+# The scaler is IO-bound and stateless (all thread→server mappings live in Redis),
+# so multiple replicas work correctly with no coordination.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: scaler
+  namespace: sync-server
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: scaler
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70

@@ -1,0 +1,16 @@
+{
+  "name": "@assistant-ui/test-client",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.3",
+    "typescript": "^5.9.2"
+  }
+}

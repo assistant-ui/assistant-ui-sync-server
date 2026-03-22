@@ -1,0 +1,23 @@
+FROM node:22-alpine
+WORKDIR /app
+
+RUN npm install -g pnpm
+
+# Copy workspace manifests (needed for pnpm workspace resolution)
+COPY pnpm-workspace.yaml pnpm-lock.yaml package.json tsconfig.json ./
+
+# Copy all package.json files so pnpm can resolve the workspace
+COPY packages/sync-server/package.json ./packages/sync-server/
+COPY packages/scaler/package.json ./packages/scaler/
+COPY packages/test-server/package.json ./packages/test-server/
+COPY packages/test-client/package.json ./packages/test-client/
+
+# Install only this package's deps
+RUN pnpm install --frozen-lockfile --filter @assistant-ui/test-server
+
+# Copy source
+COPY packages/test-server/src ./packages/test-server/src
+COPY packages/test-server/tsconfig.json ./packages/test-server/
+
+EXPOSE 9999
+CMD ["pnpm", "--filter", "@assistant-ui/test-server", "dev"]
