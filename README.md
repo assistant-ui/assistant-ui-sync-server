@@ -69,7 +69,7 @@ Resume a stream after disconnect. Returns the full stream from the beginning (bu
 { "threadId": "abc-123" }
 ```
 
-Returns the same streaming response as `/api/chat`. If the thread is not found, returns `204` with `X-Stream-Status: not_found`.
+Returns the same streaming response as `/api/chat`. If the thread is not found or already completed, returns `200` with an empty body and `X-Stream-Status` header (`not_found`, `completed`, `aborted`).
 
 ### `POST /api/cancel`
 
@@ -82,6 +82,8 @@ Cancel an in-flight stream.
 ```json
 { "success": true, "found": true }
 ```
+
+Returns `{ "success": true, "found": false }` if the thread doesn't exist.
 
 ### `POST /api/status`
 

@@ -68,6 +68,7 @@ function pipeResponseToExpress(
       res.setHeader(key, value);
     }
   }
+  res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache, no-transform");
 
   if (!response.body) {
@@ -172,8 +173,10 @@ app.post("/api/resume", (req: Request, res: ExpressResponse) => {
   const threadSync = getExistingThread(threadId);
 
   if (!threadSync) {
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache, no-transform");
     res.setHeader("X-Stream-Status", "not_found");
-    res.status(204).end();
+    res.status(200).end();
     return;
   }
 
@@ -181,8 +184,10 @@ app.post("/api/resume", (req: Request, res: ExpressResponse) => {
 
   if (response.status === 204) {
     const streamStatus = response.headers.get("X-Stream-Status");
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache, no-transform");
     res.setHeader("X-Stream-Status", streamStatus || "completed");
-    res.status(204).end();
+    res.status(200).end();
     return;
   }
 
@@ -194,7 +199,7 @@ app.post("/api/cancel", async (req: Request, res: ExpressResponse) => {
   const threadSync = getExistingThread(threadId);
 
   if (!threadSync) {
-    res.json({ success: false, found: false });
+    res.json({ success: true, found: false });
     return;
   }
 
@@ -207,7 +212,11 @@ app.post("/api/status", (req: Request, res: ExpressResponse) => {
   const threadSync = getExistingThread(threadId);
 
   if (!threadSync) {
-    res.json({ isRunning: false, status: "not_found" });
+    res.json({
+      isRunning: false,
+      status: "not_found",
+      message: "Thread not found - may not have started yet or already completed",
+    });
     return;
   }
 

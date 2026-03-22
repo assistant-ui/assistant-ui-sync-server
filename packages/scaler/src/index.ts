@@ -216,10 +216,6 @@ async function proxyJson(
 
 app.post("/api/chat", async (req, res) => {
   const { threadId } = req.body;
-  if (!threadId) {
-    res.status(400).json({ error: "threadId is required" });
-    return;
-  }
 
   // Check Redis for existing pin
   let serverUrl = await getPin(threadId);
@@ -242,8 +238,10 @@ app.post("/api/resume", async (req, res) => {
   const serverUrl = await getPin(threadId);
 
   if (!serverUrl) {
-    res.setHeader("x-stream-status", "not_found");
-    res.status(204).end();
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache, no-transform");
+    res.setHeader("X-Stream-Status", "not_found");
+    res.status(200).end();
     return;
   }
 
@@ -255,7 +253,7 @@ app.post("/api/cancel", async (req, res) => {
   const serverUrl = await getPin(threadId);
 
   if (!serverUrl) {
-    res.json({ success: false, found: false });
+    res.json({ success: true, found: false });
     return;
   }
 
@@ -268,7 +266,11 @@ app.post("/api/status", async (req, res) => {
   const serverUrl = await getPin(threadId);
 
   if (!serverUrl) {
-    res.json({ isRunning: false, status: "not_found" });
+    res.json({
+      isRunning: false,
+      status: "not_found",
+      message: "Thread not found - may not have started yet or already completed",
+    });
     return;
   }
 

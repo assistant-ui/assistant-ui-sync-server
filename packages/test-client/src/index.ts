@@ -225,7 +225,7 @@ async function testCancelMidStream() {
   });
   const streamStatus = resumeRes.headers.get("x-stream-status");
   console.log(`   Resume status: ${resumeRes.status}, x-stream-status: ${streamStatus}`);
-  assert(resumeRes.status === 204, "resume after cancel should return 204");
+  assert(resumeRes.status === 200, "resume after cancel should return 200");
   assert(streamStatus === "not_found", "x-stream-status should be not_found");
   console.log("   PASS");
 }

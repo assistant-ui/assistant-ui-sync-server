@@ -82,7 +82,11 @@ export class ThreadSync {
 
       if (!result.ok) {
         return new Response(
-          JSON.stringify({ error: `Backend error: ${result.status}` }),
+          JSON.stringify({
+            error: `Backend error: ${result.status}`,
+            body: JSON.stringify(requestBody),
+            backendUrl,
+          }),
           { status: result.status, headers: { "Content-Type": "application/json" } },
         );
       }
