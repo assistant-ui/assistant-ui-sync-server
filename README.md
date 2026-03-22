@@ -24,23 +24,23 @@ The **scaler** routes requests to the right sync server using Redis thread pinni
                     │   Client    │
                     └──────┬──────┘
                            │
-                    ┌──────▼──────┐
-                    │   Scaler    │  (stateless, scales horizontally)
-                    │  port 8788  │
+                    ┌──────▼──────┐      ┌───────┐
+                    │   Scaler    │─────▶│ Redis │
+                    │  port 8788  │      └───────┘
                     └──────┬──────┘
                            │
-              ┌────────────┼────────────┐
-              │            │            │
-        ┌─────▼─────┐  ┌──▼──┐  ┌─────▼─────┐
-        │ Sync Srv 1 │  │Redis│  │ Sync Srv 2 │
-        │  port 8787 │  │     │  │  port 8787 │
-        └─────┬──────┘  └─────┘  └─────┬──────┘
-              │                        │
-              └────────┬───────────────┘
-                       │
-                ┌──────▼──────┐
-                │ AI Backend  │
-                └─────────────┘
+                    ┌──────┴──────┐
+                    │             │
+              ┌─────▼─────┐ ┌────▼──────┐
+              │ Sync Srv 1 │ │ Sync Srv 2 │
+              │  port 8787 │ │  port 8787 │
+              └─────┬──────┘ └─────┬──────┘
+                    │              │
+                    └──────┬───────┘
+                           │
+                    ┌──────▼──────┐
+                    │ AI Backend  │
+                    └─────────────┘
 ```
 
 - **Scaler** — Reverse proxy. Looks up `threadId → sync-server` mapping in Redis. Picks the least-loaded server for new threads. Health-polls all sync servers. Stateless — runs as many replicas as needed.
