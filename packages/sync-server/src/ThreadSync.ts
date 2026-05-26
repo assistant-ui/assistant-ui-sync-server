@@ -18,6 +18,12 @@ export class ThreadSync {
   // Generation counter to prevent old stream handlers from disposing newer streams.
   private generation: number = 0;
 
+  // Total bytes of backend body observed for the current run. Snapshotted on
+  // resume as `Aui-Replay-Content-Length` so the client can treat the first N
+  // body bytes of the resume response as historical replay (no live side
+  // effects) and everything after as live.
+  private bytesReceived: number = 0;
+
   constructor(private disposeCallback: () => void) {}
 
   private getActiveReadableStream() {
@@ -50,6 +56,7 @@ export class ThreadSync {
     // Reset state for new stream
     this.completionStatus = "running";
     this.completedAt = null;
+    this.bytesReceived = 0;
 
     // Build headers from incoming request, stripping transport-level ones
     const headers = new Headers();
@@ -101,10 +108,17 @@ export class ThreadSync {
       const [conn1, teeable] = result.body.tee();
       const [conn2, conn3] = teeable.tee();
 
-      // conn2: lifecycle management — tracks stream completion/abort and schedules GC
+      // conn2: continuously drains the source (so conn1's buffer keeps filling
+      // even after the client disconnects), counts bytes for
+      // `Aui-Replay-Content-Length`, and observes lifecycle to schedule GC.
       conn2
         .pipeTo(
           new WritableStream({
+            write: (chunk) => {
+              if (currentGeneration === this.generation) {
+                this.bytesReceived += chunk.byteLength;
+              }
+            },
             abort: async () => {
               if (currentGeneration !== this.generation) return;
               this.isRunning = false;
@@ -161,7 +175,11 @@ export class ThreadSync {
     const stream = this.getActiveReadableStream();
 
     if (stream) {
-      return new Response(stream, { headers: this.headers });
+      const headers = new Headers(this.headers);
+      // Bytes already buffered when the resume starts are historical replay;
+      // anything after byte N is live. See spec.md / Aui-Replay-Content-Length.
+      headers.set("Aui-Replay-Content-Length", String(this.bytesReceived));
+      return new Response(stream, { headers });
     }
 
     // Stream recently completed/aborted — return 204 with status header
