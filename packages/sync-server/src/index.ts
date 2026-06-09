@@ -1,5 +1,5 @@
 import express from "express";
-import type { Request, Response as ExpressResponse, NextFunction } from "express";
+import type { Request as ExpressRequest, Response as ExpressResponse } from "express";
 import { readFileSync } from "fs";
 import { ThreadSync } from "./ThreadSync.js";
 
@@ -25,6 +25,11 @@ function getMemoryRatio(): number {
   return mem.heapUsed / mem.heapTotal;
 }
 
+const MEMORY_EVICTION_THRESHOLD = parseFloat(process.env.MEMORY_EVICTION_THRESHOLD || "0.9");
+const MEMORY_EVICTION_PROGRESS_CHECK_DELAY_MS = parseInt(
+  process.env.MEMORY_EVICTION_PROGRESS_CHECK_DELAY_MS || "10",
+);
+
 // --- Benign abort detection ---
 
 function isBenignAbortReason(err: unknown): boolean {
@@ -41,6 +46,7 @@ function isBenignAbortReason(err: unknown): boolean {
 // --- Thread store ---
 
 const threads = new Map<string, ThreadSync>();
+let memoryEvictionCheckQueued = false;
 
 const getExistingThread = (id: string): ThreadSync | null => threads.get(id) ?? null;
 
@@ -48,10 +54,60 @@ const getOrCreateThread = (id: string): ThreadSync => {
   const existing = threads.get(id);
   if (existing) return existing;
 
-  const ts = new ThreadSync(() => { threads.delete(id); });
+  const ts = new ThreadSync(
+    () => { threads.delete(id); },
+    requestMemoryEvictionCheck,
+  );
   threads.set(id, ts);
   return ts;
 };
+
+function evictLargestStreamIfNeeded(trigger: string) {
+  const memoryRatio = getMemoryRatio();
+  if (memoryRatio < MEMORY_EVICTION_THRESHOLD) return false;
+
+  let largest:
+    | { threadId: string; thread: ThreadSync; bufferedBytesEstimate: number }
+    | null = null;
+
+  for (const [threadId, thread] of threads) {
+    const bufferedBytesEstimate = thread.getBufferedBytesEstimate();
+    if (
+      thread.getIsRunning() &&
+      bufferedBytesEstimate > 0 &&
+      (!largest || bufferedBytesEstimate > largest.bufferedBytesEstimate)
+    ) {
+      largest = { threadId, thread, bufferedBytesEstimate };
+    }
+  }
+
+  if (!largest) {
+    return false;
+  }
+
+  const evicted = largest.thread.evictBuffer(
+    `Memory ratio ${memoryRatio.toFixed(3)} exceeded threshold ${MEMORY_EVICTION_THRESHOLD}`,
+  );
+
+  if (evicted) {
+    console.warn(
+      `Evicted stream buffer for ${largest.threadId} after ${trigger}; ` +
+        `memoryRatio=${memoryRatio.toFixed(3)}, estimatedBytes=${largest.bufferedBytesEstimate}`,
+    );
+  }
+
+  return evicted;
+}
+
+function requestMemoryEvictionCheck() {
+  if (memoryEvictionCheckQueued) return;
+  memoryEvictionCheckQueued = true;
+
+  setTimeout(() => {
+    memoryEvictionCheckQueued = false;
+    evictLargestStreamIfNeeded("stream-progress");
+  }, MEMORY_EVICTION_PROGRESS_CHECK_DELAY_MS).unref();
+}
 
 // --- Stream response helper ---
 // Pipes a web Response body to an Express response using WritableStream,
@@ -142,7 +198,7 @@ app.use(express.json({ limit: "50mb" }));
 
 // --- Routes ---
 
-app.post("/api/chat", async (req: Request, res: ExpressResponse) => {
+app.post("/api/chat", async (req: ExpressRequest, res: ExpressResponse) => {
   if (shuttingDown) {
     res.status(503).json({ error: "Server is shutting down" });
     return;
@@ -168,7 +224,7 @@ app.post("/api/chat", async (req: Request, res: ExpressResponse) => {
   }
 });
 
-app.post("/api/resume", (req: Request, res: ExpressResponse) => {
+app.post("/api/resume", (req: ExpressRequest, res: ExpressResponse) => {
   const { threadId } = req.body;
   const threadSync = getExistingThread(threadId);
 
@@ -184,9 +240,11 @@ app.post("/api/resume", (req: Request, res: ExpressResponse) => {
 
   if (response.status === 204) {
     const streamStatus = response.headers.get("X-Stream-Status");
+    const evictedAt = response.headers.get("X-Evicted-At");
     res.setHeader("Content-Type", "text/event-stream");
     res.setHeader("Cache-Control", "no-cache, no-transform");
     res.setHeader("X-Stream-Status", streamStatus || "completed");
+    if (evictedAt) res.setHeader("X-Evicted-At", evictedAt);
     res.status(200).end();
     return;
   }
@@ -194,7 +252,7 @@ app.post("/api/resume", (req: Request, res: ExpressResponse) => {
   pipeResponseToExpress(response, res, threadId);
 });
 
-app.post("/api/cancel", async (req: Request, res: ExpressResponse) => {
+app.post("/api/cancel", async (req: ExpressRequest, res: ExpressResponse) => {
   const { threadId } = req.body;
   const threadSync = getExistingThread(threadId);
 
@@ -207,7 +265,7 @@ app.post("/api/cancel", async (req: Request, res: ExpressResponse) => {
   res.json({ success: true, found: true });
 });
 
-app.post("/api/status", (req: Request, res: ExpressResponse) => {
+app.post("/api/status", (req: ExpressRequest, res: ExpressResponse) => {
   const { threadId } = req.body;
   const threadSync = getExistingThread(threadId);
 
@@ -225,17 +283,24 @@ app.post("/api/status", (req: Request, res: ExpressResponse) => {
     isRunning: info.isRunning,
     status: info.status,
     completedAt: info.completedAt,
+    evictedAt: info.evictedAt,
   });
 });
 
-app.get("/api/health", (_req: Request, res: ExpressResponse) => {
+app.get("/api/health", (_req: ExpressRequest, res: ExpressResponse) => {
   const mem = process.memoryUsage();
   const runningThreads = [...threads.values()].filter((t) => t.getIsRunning()).length;
+  const evictedThreads = [...threads.values()].filter((t) => {
+    const info = t.getCompletionStatus();
+    return info.isRunning && info.status === "evicted";
+  }).length;
   const body = {
     activeThreads: threads.size,
     runningThreads,
+    evictedThreads,
     shuttingDown,
     memoryRatio: getMemoryRatio(),
+    memoryEvictionThreshold: MEMORY_EVICTION_THRESHOLD,
     memory: {
       rss: mem.rss,
       heapUsed: mem.heapUsed,

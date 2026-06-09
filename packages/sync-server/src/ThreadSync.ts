@@ -5,6 +5,7 @@ export const REQUEST_TIMEOUT = 2 * 60 * 60 * 1000; // 2 hours
 const COMPLETED_STATE_RETENTION = 30000; // 30 seconds
 
 type CompletionStatus = "running" | "completed" | "aborted" | "error";
+type VisibleStreamStatus = CompletionStatus | "evicted";
 
 export class ThreadSync {
   private headers: Headers | undefined;
@@ -14,6 +15,7 @@ export class ThreadSync {
 
   private completionStatus: CompletionStatus = "running";
   private completedAt: number | null = null;
+  private evictedAt: number | null = null;
 
   // Generation counter to prevent old stream handlers from disposing newer streams.
   private generation: number = 0;
@@ -24,7 +26,15 @@ export class ThreadSync {
   // effects) and everything after as live.
   private bytesReceived: number = 0;
 
-  constructor(private disposeCallback: () => void) {}
+  constructor(
+    private disposeCallback: () => void,
+    private memoryPressureCallback: () => void = () => {},
+  ) {}
+
+  private getVisibleStatus(): VisibleStreamStatus {
+    if (this.isRunning && this.evictedAt !== null) return "evicted";
+    return this.completionStatus;
+  }
 
   private getActiveReadableStream() {
     if (!this.body) return null;
@@ -56,6 +66,7 @@ export class ThreadSync {
     // Reset state for new stream
     this.completionStatus = "running";
     this.completedAt = null;
+    this.evictedAt = null;
     this.bytesReceived = 0;
 
     // Build headers from incoming request, stripping transport-level ones
@@ -117,6 +128,7 @@ export class ThreadSync {
             write: (chunk) => {
               if (currentGeneration === this.generation) {
                 this.bytesReceived += chunk.byteLength;
+                this.memoryPressureCallback();
               }
             },
             abort: async () => {
@@ -159,6 +171,7 @@ export class ThreadSync {
       this.body?.cancel();
       this.body = conn1;
       this.isRunning = true;
+      this.evictedAt = null;
 
       // conn3: returned to the caller for streaming to the client
       return new Response(conn3, result);
@@ -180,6 +193,16 @@ export class ThreadSync {
       // anything after byte N is live. See spec.md / Aui-Replay-Content-Length.
       headers.set("Aui-Replay-Content-Length", String(this.bytesReceived));
       return new Response(stream, { headers });
+    }
+
+    if (this.isRunning && this.evictedAt !== null) {
+      return new Response(null, {
+        status: 204,
+        headers: {
+          "X-Stream-Status": "evicted",
+          "X-Evicted-At": this.evictedAt.toString(),
+        },
+      });
     }
 
     // Stream recently completed/aborted — return 204 with status header
@@ -205,10 +228,25 @@ export class ThreadSync {
 
   getCompletionStatus() {
     return {
-      status: this.completionStatus,
+      status: this.getVisibleStatus(),
       completedAt: this.completedAt,
+      evictedAt: this.evictedAt,
       isRunning: this.isRunning,
     };
+  }
+
+  getBufferedBytesEstimate() {
+    return this.body ? this.bytesReceived : 0;
+  }
+
+  evictBuffer(reason = "Stream buffer evicted under memory pressure") {
+    if (!this.isRunning || !this.body) return false;
+
+    const body = this.body;
+    this.body = null;
+    this.evictedAt = Date.now();
+    void body.cancel(reason).catch(() => {});
+    return true;
   }
 
   async cancel() {
@@ -219,6 +257,7 @@ export class ThreadSync {
     this.isRunning = false;
     this.completionStatus = "aborted";
     this.completedAt = Date.now();
+    this.evictedAt = null;
     this.disposeCallback();
   }
 }

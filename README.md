@@ -44,7 +44,7 @@ The **scaler** routes requests to the right sync server using Redis thread pinni
 ```
 
 - **Scaler** — Reverse proxy. Looks up `threadId → sync-server` mapping in Redis. Picks the least-loaded server for new threads. Health-polls all sync servers. Stateless — runs as many replicas as needed.
-- **Sync Server** — Holds in-flight streams in memory. Forwards `/api/chat` to the AI backend, tees the response stream for resumability. Reports memory usage and thread count to the scaler via `/api/health`.
+- **Sync Server** — Holds in-flight streams in memory. Forwards `/api/chat` to the AI backend, tees the response stream for resumability, and evicts the largest resumable buffer under memory pressure while keeping the backend stream running. Reports memory usage and thread count to the scaler via `/api/health`.
 - **Redis** — Stores `threadId → sync-server URL` with a TTL. That's it.
 
 ## API
@@ -69,7 +69,7 @@ Resume a stream after disconnect. Returns the full stream from the beginning (bu
 { "threadId": "abc-123" }
 ```
 
-Returns the same streaming response as `/api/chat`. If the thread is not found or already completed, returns `200` with an empty body and `X-Stream-Status` header (`not_found`, `completed`, `aborted`).
+Returns the same streaming response as `/api/chat`. If the thread is not found, already completed, or no longer resumable, returns `200` with an empty body and `X-Stream-Status` header (`not_found`, `completed`, `aborted`, `evicted`).
 
 ### `POST /api/cancel`
 
@@ -97,7 +97,7 @@ Check if a thread is still running.
 { "isRunning": false, "status": "completed", "completedAt": 1710000000000 }
 ```
 
-Status is one of: `running`, `completed`, `aborted`, `error`, `not_found`.
+Status is one of: `running`, `evicted`, `completed`, `aborted`, `error`, `not_found`. `evicted` means the backend stream is still running, but the replay buffer was removed under memory pressure and the thread can no longer be resumed.
 
 ### `GET /api/health`
 
@@ -194,6 +194,8 @@ cd packages/test-client && pnpm dev
 |---|---|---|
 | `PORT` | `8787` | Listen port |
 | `SHUTDOWN_TIMEOUT_MS` | `3600000` | Max time to drain active streams on SIGTERM (1 hour) |
+| `MEMORY_EVICTION_THRESHOLD` | `0.9` | Sync-server memory ratio that triggers eviction of the largest running resumable stream buffer |
+| `MEMORY_EVICTION_PROGRESS_CHECK_DELAY_MS` | `10` | Delay for coalesced stream-progress-triggered memory eviction checks |
 
 ## Project structure
 
@@ -211,13 +213,15 @@ docker-compose.yml # Local stack with 2 sync servers
 
 The sync server uses `ReadableStream.tee()` to fork the backend response:
 
-1. **conn1** — stored for future resume calls (internally buffers all data)
+1. **conn1** — stored for future resume calls (internally buffers all data and may be evicted under memory pressure)
 2. **conn2** — lifecycle management (tracks completion, schedules GC)
 3. **conn3** — sent to the original client
 
 When a client calls `/api/resume`, the stored branch (`conn1`) is tee'd again. Because the tee buffer holds all unconsumed data, the new branch replays the full stream from the beginning, then continues with live data.
 
 After the stream completes, the `ThreadSync` instance is kept for 50 seconds (20s GC delay + 30s retention) so late resumers can still get the completion status before it's garbage collected.
+
+If sync-server memory reaches `MEMORY_EVICTION_THRESHOLD` (default `0.9`), the server ranks running resumable streams by estimated buffered bytes, evicts the largest stored branch, and keeps the lifecycle branch draining so the original backend stream can still finish. `/api/status` returns `status: "evicted"` with `isRunning: true` while that stream is still active, and `/api/resume` returns an empty `200` with `X-Stream-Status: evicted`.
 
 ## How scaling works
 
