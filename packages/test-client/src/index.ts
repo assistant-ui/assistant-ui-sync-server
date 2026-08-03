@@ -230,12 +230,67 @@ async function testCancelMidStream() {
   console.log("   PASS");
 }
 
+// --- Test 5: Initial state is tied to the resumed run ---
+async function testResumeInitialState() {
+  const threadId = `test-initial-state-${Date.now()}`;
+  const initialState = { messages: [{ id: "user-1", content: "hello" }] };
+  console.log(`\n=== Test 5: resume uses the retained initial state ===\n`);
+
+  const chatRes = await fetch(`${ENTRY_POINT}/api/chat`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      threadId,
+      backendUrl: BACKEND_URL,
+      state: initialState,
+    }),
+  });
+  await readStream(chatRes, "initial-state-chat", { abortAfterChunks: 1 });
+
+  const stateRes = await fetch(`${ENTRY_POINT}/api/initial-state`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ threadId }),
+  });
+  assert(stateRes.ok, "initial state request should succeed");
+  const snapshot = (await stateRes.json()) as {
+    runId: string;
+    state: unknown;
+  };
+  assert(typeof snapshot.runId === "string", "snapshot should identify its run");
+  assert(
+    JSON.stringify(snapshot.state) === JSON.stringify(initialState),
+    "snapshot should preserve the state that started the run",
+  );
+
+  const mismatchRes = await fetch(`${ENTRY_POINT}/api/resume`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ threadId, runId: "different-run" }),
+  });
+  assert(mismatchRes.status === 409, "a mismatched run should not be replayed");
+  assert(
+    mismatchRes.headers.get("x-stream-status") === "run_mismatch",
+    "a mismatched run should report its status",
+  );
+
+  const resumeRes = await fetch(`${ENTRY_POINT}/api/resume`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ threadId, runId: snapshot.runId }),
+  });
+  assert(resumeRes.ok, "the matching run should resume");
+  await readStream(resumeRes, "initial-state-resume");
+  console.log("   PASS");
+}
+
 // --- Run ---
 async function main() {
   await testReplayAfterComplete();
   await testResumeMidStream();
   await testScalerHealth();
   await testCancelMidStream();
+  await testResumeInitialState();
   console.log("\n=== All tests passed ===\n");
 }
 

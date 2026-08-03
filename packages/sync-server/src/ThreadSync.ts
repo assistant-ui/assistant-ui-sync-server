@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 const COMPLETE_GC_DELAY = 20000;
 export const REQUEST_TIMEOUT = 2 * 60 * 60 * 1000; // 2 hours
 
@@ -16,6 +18,8 @@ export class ThreadSync {
   private completionStatus: CompletionStatus = "running";
   private completedAt: number | null = null;
   private evictedAt: number | null = null;
+  private runId: string | null = null;
+  private initialState: unknown = null;
 
   // Generation counter to prevent old stream handlers from disposing newer streams.
   private generation: number = 0;
@@ -62,6 +66,8 @@ export class ThreadSync {
   ): Promise<Response> {
     this.generation++;
     const currentGeneration = this.generation;
+    this.runId = randomUUID();
+    this.initialState = requestBody.state ?? null;
 
     // Reset state for new stream
     this.completionStatus = "running";
@@ -184,7 +190,26 @@ export class ThreadSync {
     }
   }
 
-  resume(): Response {
+  getInitialState(): { runId: string; state: unknown } | null {
+    if (this.runId === null) return null;
+
+    return {
+      runId: this.runId,
+      state: this.initialState,
+    };
+  }
+
+  resume(expectedRunId?: string): Response {
+    if (expectedRunId !== undefined && expectedRunId !== this.runId) {
+      return Response.json(
+        { error: "The requested run no longer matches the active thread run" },
+        {
+          status: 409,
+          headers: { "X-Stream-Status": "run_mismatch" },
+        },
+      );
+    }
+
     const stream = this.getActiveReadableStream();
 
     if (stream) {
