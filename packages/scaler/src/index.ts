@@ -248,6 +248,18 @@ app.post("/api/resume", async (req, res) => {
   await proxyStream(`${serverUrl}/api/resume`, req.body, req.headers, res, threadId);
 });
 
+app.post("/api/initial-state", async (req, res) => {
+  const { threadId } = req.body;
+  const serverUrl = await getPin(threadId);
+
+  if (!serverUrl) {
+    res.status(404).json({ error: "Thread run not found" });
+    return;
+  }
+
+  await proxyJson(`${serverUrl}/api/initial-state`, req.body, res);
+});
+
 app.post("/api/cancel", async (req, res) => {
   const { threadId } = req.body;
   const serverUrl = await getPin(threadId);

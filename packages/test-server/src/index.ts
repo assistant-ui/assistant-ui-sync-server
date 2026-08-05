@@ -23,6 +23,10 @@ app.post("/api/chat", async (_req, res) => {
   res.end();
 });
 
+app.post("/api/fail", (_req, res) => {
+  res.status(503).json({ error: "Intentional backend failure" });
+});
+
 app.get("/api/health", (_req, res) => {
   res.json({ ok: true });
 });

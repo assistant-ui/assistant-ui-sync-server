@@ -118,17 +118,20 @@ function pipeResponseToExpress(
   res: ExpressResponse,
   threadId: string,
 ) {
-  // Forward non-transport headers
+  res.status(response.status);
+
   for (const [key, value] of response.headers.entries()) {
     if (!["content-encoding", "content-length", "transfer-encoding"].includes(key)) {
       res.setHeader(key, value);
     }
   }
-  res.setHeader("Content-Type", "text/event-stream");
-  res.setHeader("Cache-Control", "no-cache, no-transform");
+  if (response.ok) {
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache, no-transform");
+  }
 
   if (!response.body) {
-    res.status(204).end();
+    res.end();
     return;
   }
 
@@ -224,8 +227,21 @@ app.post("/api/chat", async (req: ExpressRequest, res: ExpressResponse) => {
   }
 });
 
-app.post("/api/resume", (req: ExpressRequest, res: ExpressResponse) => {
+app.post("/api/initial-state", (req: ExpressRequest, res: ExpressResponse) => {
   const { threadId } = req.body;
+  const threadSync = getExistingThread(threadId);
+  const initialState = threadSync?.getInitialState();
+
+  if (!initialState) {
+    res.status(404).json({ error: "Thread run not found" });
+    return;
+  }
+
+  res.json(initialState);
+});
+
+app.post("/api/resume", async (req: ExpressRequest, res: ExpressResponse) => {
+  const { threadId, runId } = req.body;
   const threadSync = getExistingThread(threadId);
 
   if (!threadSync) {
@@ -236,7 +252,17 @@ app.post("/api/resume", (req: ExpressRequest, res: ExpressResponse) => {
     return;
   }
 
-  const response = threadSync.resume();
+  const response = threadSync.resume(
+    typeof runId === "string" ? runId : undefined,
+  );
+
+  if (!response.ok) {
+    for (const [key, value] of response.headers.entries()) {
+      res.setHeader(key, value);
+    }
+    res.status(response.status).send(await response.text());
+    return;
+  }
 
   if (response.status === 204) {
     const streamStatus = response.headers.get("X-Stream-Status");

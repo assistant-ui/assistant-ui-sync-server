@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 const COMPLETE_GC_DELAY = 20000;
 export const REQUEST_TIMEOUT = 2 * 60 * 60 * 1000; // 2 hours
 
@@ -16,6 +18,10 @@ export class ThreadSync {
   private completionStatus: CompletionStatus = "running";
   private completedAt: number | null = null;
   private evictedAt: number | null = null;
+  private runId: string | null = null;
+  private initialState: unknown = null;
+  private hasInitialState: boolean = false;
+  private initialStateBytes: number = 0;
 
   // Generation counter to prevent old stream handlers from disposing newer streams.
   private generation: number = 0;
@@ -30,6 +36,31 @@ export class ThreadSync {
     private disposeCallback: () => void,
     private memoryPressureCallback: () => void = () => {},
   ) {}
+
+  private clearRetainedState() {
+    this.initialState = null;
+    this.hasInitialState = false;
+    this.initialStateBytes = 0;
+  }
+
+  private failRun(currentGeneration: number) {
+    if (currentGeneration !== this.generation) return;
+
+    this.abortController?.abort("Run setup failed");
+    this.abortController = null;
+    const body = this.body;
+    this.body = null;
+    void body?.cancel("Run setup failed").catch(() => {});
+    this.headers = undefined;
+    this.runId = null;
+    this.clearRetainedState();
+    this.isRunning = false;
+    this.completionStatus = "error";
+    this.completedAt = Date.now();
+    this.evictedAt = null;
+    this.bytesReceived = 0;
+    this.disposeCallback();
+  }
 
   private getVisibleStatus(): VisibleStreamStatus {
     if (this.isRunning && this.evictedAt !== null) return "evicted";
@@ -62,8 +93,23 @@ export class ThreadSync {
   ): Promise<Response> {
     this.generation++;
     const currentGeneration = this.generation;
+    const runId = randomUUID();
+    const initialState = requestBody.state ?? null;
+    const initialStateBytes = Buffer.byteLength(
+      JSON.stringify(initialState),
+      "utf8",
+    );
 
     // Reset state for new stream
+    this.abortController?.abort("New request started");
+    this.abortController = null;
+    const previousBody = this.body;
+    this.body = null;
+    void previousBody?.cancel("New request started").catch(() => {});
+    this.headers = undefined;
+    this.runId = null;
+    this.clearRetainedState();
+    this.isRunning = false;
     this.completionStatus = "running";
     this.completedAt = null;
     this.evictedAt = null;
@@ -83,9 +129,6 @@ export class ThreadSync {
     headers.delete("accept-encoding");
     headers.delete("host");
     headers.delete("connection");
-    this.headers = headers;
-
-    this.abortController?.abort("New request started");
     this.abortController = new AbortController();
     // @ts-ignore — AbortSignal.any exists in Node 20+
     const signal = AbortSignal.any([this.abortController.signal, timeoutSignal]);
@@ -98,7 +141,16 @@ export class ThreadSync {
         signal,
       });
 
+      if (currentGeneration !== this.generation) {
+        void result.body?.cancel("Request superseded").catch(() => {});
+        return Response.json(
+          { error: "Request superseded by a newer run" },
+          { status: 409 },
+        );
+      }
+
       if (!result.ok) {
+        this.failRun(currentGeneration);
         return new Response(
           JSON.stringify({
             error: `Backend error: ${result.status}`,
@@ -110,6 +162,7 @@ export class ThreadSync {
       }
 
       if (!result.body) {
+        this.failRun(currentGeneration);
         return new Response(
           JSON.stringify({ error: "Backend returned no body" }),
           { status: 500, headers: { "Content-Type": "application/json" } },
@@ -118,6 +171,16 @@ export class ThreadSync {
 
       const [conn1, teeable] = result.body.tee();
       const [conn2, conn3] = teeable.tee();
+
+      this.headers = headers;
+      this.body = conn1;
+      this.runId = runId;
+      this.initialState = initialState;
+      this.hasInitialState = true;
+      this.initialStateBytes = initialStateBytes;
+      this.isRunning = true;
+      this.evictedAt = null;
+      this.memoryPressureCallback();
 
       // conn2: continuously drains the source (so conn1's buffer keeps filling
       // even after the client disconnects), counts bytes for
@@ -168,15 +231,10 @@ export class ThreadSync {
           if (currentGeneration === this.generation) this.disposeCallback();
         });
 
-      this.body?.cancel();
-      this.body = conn1;
-      this.isRunning = true;
-      this.evictedAt = null;
-
       // conn3: returned to the caller for streaming to the client
       return new Response(conn3, result);
     } catch {
-      this.isRunning = false;
+      this.failRun(currentGeneration);
       return new Response(
         JSON.stringify({ error: "Failed to connect to backend" }),
         { status: 503, headers: { "Content-Type": "application/json" } },
@@ -184,7 +242,26 @@ export class ThreadSync {
     }
   }
 
-  resume(): Response {
+  getInitialState(): { runId: string; state: unknown } | null {
+    if (this.runId === null || !this.hasInitialState) return null;
+
+    return {
+      runId: this.runId,
+      state: this.initialState,
+    };
+  }
+
+  resume(expectedRunId?: string): Response {
+    if (expectedRunId !== undefined && expectedRunId !== this.runId) {
+      return Response.json(
+        { error: "The requested run no longer matches the active thread run" },
+        {
+          status: 409,
+          headers: { "X-Stream-Status": "run_mismatch" },
+        },
+      );
+    }
+
     const stream = this.getActiveReadableStream();
 
     if (stream) {
@@ -236,16 +313,17 @@ export class ThreadSync {
   }
 
   getBufferedBytesEstimate() {
-    return this.body ? this.bytesReceived : 0;
+    return (this.body ? this.bytesReceived : 0) + this.initialStateBytes;
   }
 
   evictBuffer(reason = "Stream buffer evicted under memory pressure") {
-    if (!this.isRunning || !this.body) return false;
+    if (!this.isRunning || (!this.body && !this.hasInitialState)) return false;
 
     const body = this.body;
     this.body = null;
+    this.clearRetainedState();
     this.evictedAt = Date.now();
-    void body.cancel(reason).catch(() => {});
+    void body?.cancel(reason).catch(() => {});
     return true;
   }
 
@@ -254,6 +332,8 @@ export class ThreadSync {
     this.abortController = null;
     this.body?.cancel();
     this.body = null;
+    this.runId = null;
+    this.clearRetainedState();
     this.isRunning = false;
     this.completionStatus = "aborted";
     this.completedAt = Date.now();
