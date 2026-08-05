@@ -118,17 +118,20 @@ function pipeResponseToExpress(
   res: ExpressResponse,
   threadId: string,
 ) {
-  // Forward non-transport headers
+  res.status(response.status);
+
   for (const [key, value] of response.headers.entries()) {
     if (!["content-encoding", "content-length", "transfer-encoding"].includes(key)) {
       res.setHeader(key, value);
     }
   }
-  res.setHeader("Content-Type", "text/event-stream");
-  res.setHeader("Cache-Control", "no-cache, no-transform");
+  if (response.ok) {
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache, no-transform");
+  }
 
   if (!response.body) {
-    res.status(204).end();
+    res.end();
     return;
   }
 

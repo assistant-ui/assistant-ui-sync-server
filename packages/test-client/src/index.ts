@@ -1,5 +1,6 @@
 const ENTRY_POINT = process.env.SYNC_URL || "http://localhost:8788"; // scaler by default
 const BACKEND_URL = process.env.BACKEND_URL || "http://localhost:9999/api/chat";
+const FAILING_BACKEND_URL = new URL("fail", BACKEND_URL).toString();
 
 async function readStream(
   res: Response,
@@ -284,6 +285,102 @@ async function testResumeInitialState() {
   console.log("   PASS");
 }
 
+// --- Test 6: Failed starts do not publish initial state ---
+async function testFailedStart() {
+  const threadId = `test-failed-start-${Date.now()}`;
+  console.log(`\n=== Test 6: failed starts do not publish initial state ===\n`);
+
+  const chatRes = await fetch(`${ENTRY_POINT}/api/chat`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      threadId,
+      backendUrl: FAILING_BACKEND_URL,
+      state: { messages: ["must not be retained"] },
+    }),
+  });
+  assert(chatRes.status === 503, "the backend failure should be forwarded");
+
+  const stateRes = await fetch(`${ENTRY_POINT}/api/initial-state`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ threadId }),
+  });
+  assert(stateRes.status === 404, "a failed start should not publish initial state");
+  console.log("   PASS");
+}
+
+// --- Test 7: Failed replacements invalidate the previous run ---
+async function testFailedReplacement() {
+  const threadId = `test-failed-replacement-${Date.now()}`;
+  console.log(`\n=== Test 7: failed replacements invalidate the previous run ===\n`);
+
+  const chatRes = await fetch(`${ENTRY_POINT}/api/chat`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      threadId,
+      backendUrl: BACKEND_URL,
+      state: { messages: ["original"] },
+    }),
+  });
+  await readStream(chatRes, "replacement-original", { abortAfterChunks: 1 });
+
+  const stateRes = await fetch(`${ENTRY_POINT}/api/initial-state`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ threadId }),
+  });
+  assert(stateRes.ok, "the original run should publish initial state");
+  const snapshot = (await stateRes.json()) as { runId: string };
+
+  const replacementRes = await fetch(`${ENTRY_POINT}/api/chat`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      threadId,
+      backendUrl: FAILING_BACKEND_URL,
+      state: { messages: ["replacement"] },
+    }),
+  });
+  assert(replacementRes.status === 503, "the replacement failure should be forwarded");
+
+  const replacementStateRes = await fetch(`${ENTRY_POINT}/api/initial-state`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ threadId }),
+  });
+  assert(
+    replacementStateRes.status === 404,
+    "a failed replacement should not retain either run's initial state",
+  );
+
+  const resumeRes = await fetch(`${ENTRY_POINT}/api/resume`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ threadId, runId: snapshot.runId }),
+  });
+  assert(
+    resumeRes.headers.get("x-stream-status") === "not_found",
+    "the previous run should not remain resumable after a failed replacement",
+  );
+  console.log("   PASS");
+}
+
+// --- Test 8: Missing threads have no initial state ---
+async function testMissingInitialState() {
+  const threadId = `test-missing-state-${Date.now()}`;
+  console.log(`\n=== Test 8: missing threads have no initial state ===\n`);
+
+  const stateRes = await fetch(`${ENTRY_POINT}/api/initial-state`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ threadId }),
+  });
+  assert(stateRes.status === 404, "a missing thread should return 404");
+  console.log("   PASS");
+}
+
 // --- Run ---
 async function main() {
   await testReplayAfterComplete();
@@ -291,6 +388,9 @@ async function main() {
   await testScalerHealth();
   await testCancelMidStream();
   await testResumeInitialState();
+  await testFailedStart();
+  await testFailedReplacement();
+  await testMissingInitialState();
   console.log("\n=== All tests passed ===\n");
 }
 
