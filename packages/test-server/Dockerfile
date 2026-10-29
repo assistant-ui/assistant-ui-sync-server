@@ -1,4 +1,4 @@
-FROM node:22-alpine
+FROM node:26.13.0-alpine
 WORKDIR /app
 
 RUN npm install -g pnpm
