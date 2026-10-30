@@ -66,10 +66,26 @@ Returns a streaming response (SSE, NDJSON, or whatever your backend sends).
 Resume a stream after disconnect. Returns the full stream from the beginning (buffered via `tee()`), then continues with live data if still running.
 
 ```json
-{ "threadId": "abc-123" }
+{ "threadId": "abc-123", "runId": "8b3a..." }
 ```
 
 Returns the same streaming response as `/api/chat`. If the thread is not found, already completed, or no longer resumable, returns `200` with an empty body and `X-Stream-Status` header (`not_found`, `completed`, `aborted`, `evicted`).
+
+When `runId` is provided, the server returns `409` with `X-Stream-Status: run_mismatch` rather than replaying a different run.
+
+### `POST /api/initial-state`
+
+Fetch the state snapshot that started the active run before attaching to its replay stream.
+
+```json
+{ "threadId": "abc-123" }
+```
+
+```json
+{ "runId": "8b3a...", "state": { "messages": [] } }
+```
+
+Pass the returned `runId` to `/api/resume` so a replacement run cannot be paired with the older snapshot.
 
 ### `POST /api/cancel`
 
@@ -122,12 +138,13 @@ docker compose --profile test run --rm test-client
 docker compose down
 ```
 
-This starts redis, 2 sync servers, a scaler, and a fake AI backend (test-server). The test client runs 4 integration tests:
+This starts redis, 2 sync servers, a scaler, and a fake AI backend (test-server). The test client runs 5 integration tests:
 
 1. Disconnect after 3 chunks, wait for completion, resume — full replay
 2. Disconnect after 2 chunks, resume immediately — mid-stream resume
 3. Health check + concurrent stream routing across servers
 4. Cancel mid-stream
+5. Fetch the retained initial state and reject a mismatched resume run
 
 ### Kubernetes (Docker Desktop)
 
